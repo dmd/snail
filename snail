@@ -233,7 +233,7 @@ def main(stdscr, args):
     stdscr.timeout(30)  # ~33 FPS
 
     # Load snail sprites
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = os.path.dirname(os.path.realpath(__file__))
     image_dir = os.path.join(script_dir, 'images')
     snail_types = load_snail_types(image_dir)
 

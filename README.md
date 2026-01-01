@@ -18,3 +18,4 @@ Runtime controls:
     -       Remove a snail
 ```
 
+[![asciicast](https://asciinema.org/a/hDlRM3LWyqWBfrYOAolCJSfcf.svg)](https://asciinema.org/a/hDlRM3LWyqWBfrYOAolCJSfcf)

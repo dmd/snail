@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""
+snail.py - ASCII art snail animation in the style of sl and asciiquarium
+
+All ASCII art shamelessly copied from various ascii art websites.
+
+
+Usage:
+    ./snail.py              # 3 snails, normal speed
+    ./snail.py -n 10        # 10 snails
+    ./snail.py -n 5 -s 0.5  # 5 snails, half speed
+
+Runtime controls:
+    q       Quit
+    p       Pause/unpause
+    +/=     Add a snail
+    -       Remove a snail
+"""
+
+import argparse
+import curses
+import glob
+import os
+import random
+import re
+import signal
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+
+@dataclass
+class SnailType:
+    """A snail sprite type with normal and extended-neck frames."""
+    number: int
+    direction: str  # 'L' or 'R'
+    frames: list[list[str]]  # [normal_lines, extended_lines]
+    width: int
+    height: int
+
+
+@dataclass
+class Snail:
+    """An active snail on the screen."""
+    snail_type: SnailType
+    x: float  # Can be fractional for smooth movement
+    y: int
+    speed: float  # Pixels per frame
+    frame_index: int = 0
+    tick: int = 0
+    animation_rate: int = 8  # Ticks between frame changes
+
+
+def load_snail_types(image_dir: str) -> list[SnailType]:
+    """Load all snail sprites from the image directory."""
+    snail_types = []
+
+    # Find all base snail files (not -w variants)
+    pattern = os.path.join(image_dir, "snail-*-[LR].txt")
+    base_files = glob.glob(pattern)
+
+    for base_file in sorted(base_files):
+        # Parse filename: snail-NN-D.txt
+        basename = os.path.basename(base_file)
+        match = re.match(r'snail-(\d+)-([LR])\.txt', basename)
+        if not match:
+            continue
+
+        number = int(match.group(1))
+        direction = match.group(2)
+
+        # Construct extended-neck filename
+        extended_file = base_file.replace('.txt', '-w.txt')
+
+        if not os.path.exists(extended_file):
+            continue
+
+        # Load both frames
+        try:
+            with open(base_file, 'r', encoding='utf-8') as f:
+                normal_lines = f.read().rstrip('\n').split('\n')
+            with open(extended_file, 'r', encoding='utf-8') as f:
+                extended_lines = f.read().rstrip('\n').split('\n')
+        except Exception as e:
+            print(f"Warning: Could not load {base_file}: {e}", file=sys.stderr)
+            continue
+
+        # Calculate dimensions (max of both frames)
+        width = max(
+            max((len(line) for line in normal_lines), default=0),
+            max((len(line) for line in extended_lines), default=0)
+        )
+        height = max(len(normal_lines), len(extended_lines))
+
+        # Pad frames to same height
+        while len(normal_lines) < height:
+            normal_lines.append('')
+        while len(extended_lines) < height:
+            extended_lines.append('')
+
+        snail_types.append(SnailType(
+            number=number,
+            direction=direction,
+            frames=[normal_lines, extended_lines],
+            width=width,
+            height=height
+        ))
+
+    return snail_types
+
+
+def calculate_lanes(screen_height: int, max_snail_height: int, margin: int = 2) -> list[int]:
+    """Calculate Y positions for snail lanes."""
+    usable_height = screen_height - margin
+    lane_height = max_snail_height + 1
+    num_lanes = max(1, usable_height // lane_height)
+
+    lanes = []
+    for i in range(num_lanes):
+        y = margin + i * lane_height
+        if y + max_snail_height <= screen_height:
+            lanes.append(y)
+
+    return lanes if lanes else [margin]
+
+
+def spawn_snail(
+    snail_types: list[SnailType],
+    lanes: list[int],
+    screen_width: int,
+    base_speed: float,
+    active_snails: list[Snail]
+) -> Optional[Snail]:
+    """Spawn a new snail at the edge of the screen."""
+    if not snail_types:
+        return None
+
+    # Pick a random snail type
+    snail_type = random.choice(snail_types)
+
+    # Pick a lane, preferring less crowded ones
+    lane_counts = {lane: 0 for lane in lanes}
+    for s in active_snails:
+        if s.y in lane_counts:
+            lane_counts[s.y] += 1
+
+    # Weight toward emptier lanes
+    min_count = min(lane_counts.values()) if lane_counts else 0
+    preferred_lanes = [l for l, c in lane_counts.items() if c == min_count]
+    y = random.choice(preferred_lanes) if preferred_lanes else random.choice(lanes)
+
+    # Set starting position based on direction
+    if snail_type.direction == 'L':
+        # Faces left, moves right-to-left, starts off-screen right
+        x = float(screen_width)
+    else:
+        # Faces right, moves left-to-right, starts off-screen left
+        x = float(-snail_type.width)
+
+    # Random speed variation (0.5x to 1.5x base speed, scaled by 0.7 for snail-appropriate pace)
+    speed = base_speed * 0.3 * random.uniform(0.5, 1.5)
+
+    # Random animation rate for variety
+    animation_rate = random.randint(6, 12)
+
+    return Snail(
+        snail_type=snail_type,
+        x=x,
+        y=y,
+        speed=speed,
+        animation_rate=animation_rate
+    )
+
+
+def update_snail(snail: Snail, screen_width: int) -> bool:
+    """
+    Update snail position and animation.
+    Returns True if snail is still on screen, False if it should be removed.
+    """
+    # Move based on direction
+    if snail.snail_type.direction == 'L':
+        snail.x -= snail.speed
+        # Off-screen left?
+        if snail.x + snail.snail_type.width < 0:
+            return False
+    else:
+        snail.x += snail.speed
+        # Off-screen right?
+        if snail.x > screen_width:
+            return False
+
+    # Update animation
+    snail.tick += 1
+    if snail.tick >= snail.animation_rate:
+        snail.tick = 0
+        snail.frame_index = 1 - snail.frame_index
+
+    return True
+
+
+def draw_snail(stdscr, snail: Snail, screen_height: int, screen_width: int):
+    """Draw a snail on the screen, handling edge clipping."""
+    frame = snail.snail_type.frames[snail.frame_index]
+    x = int(snail.x)
+    y = snail.y
+
+    for row_idx, line in enumerate(frame):
+        screen_y = y + row_idx
+        if screen_y < 0 or screen_y >= screen_height:
+            continue
+
+        for col_idx, char in enumerate(line):
+            screen_x = x + col_idx
+            if screen_x < 0 or screen_x >= screen_width - 1:
+                continue
+            # Draw all characters including spaces (for occlusion)
+            try:
+                stdscr.addstr(screen_y, screen_x, char)
+            except curses.error:
+                # Ignore errors from writing to edge of screen
+                pass
+
+
+def main(stdscr, args):
+    """Main animation loop."""
+    # Setup curses
+    curses.curs_set(0)  # Hide cursor
+    stdscr.nodelay(True)  # Non-blocking input
+    stdscr.timeout(30)  # ~33 FPS
+
+    # Load snail sprites
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    image_dir = os.path.join(script_dir, 'images')
+    snail_types = load_snail_types(image_dir)
+
+    if not snail_types:
+        raise RuntimeError(f"No snail images found in {image_dir}")
+
+    # Calculate max snail dimensions
+    max_height = max(st.height for st in snail_types)
+
+    # State
+    active_snails: list[Snail] = []
+    target_count = args.count
+    base_speed = args.speed
+    paused = False
+    spawn_delay = 0  # Frames to wait before spawning
+
+    # Resize handler flag
+    needs_resize = False
+
+    def handle_resize(signum, frame):
+        nonlocal needs_resize
+        needs_resize = True
+
+    signal.signal(signal.SIGWINCH, handle_resize)
+
+    while True:
+        # Handle resize
+        if needs_resize:
+            needs_resize = False
+            curses.endwin()
+            stdscr.refresh()
+
+        # Get screen dimensions
+        screen_height, screen_width = stdscr.getmaxyx()
+        lanes = calculate_lanes(screen_height, max_height)
+
+        # Handle input
+        try:
+            key = stdscr.getch()
+        except:
+            key = -1
+
+        if key == ord('q'):
+            break
+        elif key == ord('p'):
+            paused = not paused
+        elif key in (ord('+'), ord('=')):
+            target_count += 1
+        elif key == ord('-'):
+            target_count = max(0, target_count - 1)
+
+        if paused:
+            # Show paused indicator
+            stdscr.clear()
+            for snail in active_snails:
+                draw_snail(stdscr, snail, screen_height, screen_width)
+            pause_msg = " PAUSED "
+            try:
+                stdscr.addstr(0, screen_width // 2 - len(pause_msg) // 2, pause_msg, curses.A_REVERSE)
+            except curses.error:
+                pass
+            stdscr.refresh()
+            continue
+
+        # Update snails
+        active_snails = [s for s in active_snails if update_snail(s, screen_width)]
+
+        # Remove excess snails if target decreased
+        while len(active_snails) > target_count:
+            active_snails.pop(random.randrange(len(active_snails)))
+
+        # Spawn new snails if needed
+        if spawn_delay > 0:
+            spawn_delay -= 1
+        elif len(active_snails) < target_count:
+            new_snail = spawn_snail(snail_types, lanes, screen_width, base_speed, active_snails)
+            if new_snail:
+                active_snails.append(new_snail)
+                spawn_delay = random.randint(10, 30)  # Stagger spawns
+
+        # Draw (sort by Y so lower snails occlude upper ones)
+        stdscr.clear()
+        for snail in sorted(active_snails, key=lambda s: s.y):
+            draw_snail(stdscr, snail, screen_height, screen_width)
+
+        # Status line (optional, can be removed)
+        # status = f" Snails: {len(active_snails)}/{target_count} | Speed: {base_speed:.1f}x | +/- to adjust | p=pause | q=quit "
+        # try:
+        #     stdscr.addstr(screen_height - 1, 0, status[:screen_width-1], curses.A_DIM)
+        # except curses.error:
+        #     pass
+
+        stdscr.refresh()
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='ASCII snail animation',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Runtime controls:
+  q       Quit
+  p       Pause/unpause
+  +/=     Add a snail
+  -       Remove a snail
+'''
+    )
+    parser.add_argument(
+        '-n', '--count',
+        type=int,
+        default=3,
+        help='Target number of snails on screen (default: 3)'
+    )
+    parser.add_argument(
+        '-s', '--speed',
+        type=float,
+        default=1.0,
+        help='Speed multiplier (default: 1.0)'
+    )
+    return parser.parse_args()
+
+
+if __name__ == '__main__':
+    args = parse_args()
+
+    try:
+        curses.wrapper(lambda stdscr: main(stdscr, args))
+    except KeyboardInterrupt:
+        pass
+    except curses.error:
+        # Ignore curses cleanup errors
+        pass
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
